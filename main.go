@@ -1,227 +1,129 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"os"
 )
 
 type NodeType int
 
 const (
-	NTSymbol NodeType = iota
-	NTKeyword
-	NTNumber
-	NTString
+	NTToken NodeType = iota
+	NTExpr
 	NTList
-	NTDot
+	NTDict
+	NTDeref
 	NTAssign
 )
 
 var nodeTypeNames = map[NodeType]string{
-	NTSymbol:  "symbol",
-	NTKeyword: "keyword",
-	NTNumber:  "number",
-	NTString:  "string",
-	NTList:    "list",
-	NTDot:     "dot",
-	NTAssign:  "assign",
+	NTToken:  "token",
+	NTExpr:   "expr",
+	NTList:   "list",
+	NTDict:   "dict",
+	NTDeref:  "deref",
+	NTAssign: "assign",
 }
 
 type Node struct {
+	// Meta
+	parent   *Node
 	nodeType NodeType
-	value    string  // For normal values
-	children []*Node // For use with lists
+
+	// Leaf
+	tokenType TokenType
+	value     string
+
+	// Branch
+	children []*Node
 }
 
-func (n *Node) String() string {
-	return fmt.Sprintf("[%s|%s]", nodeTypeNames[n.nodeType], n.value)
+func (n *Node) MarshalJSON() ([]byte, error) {
+	if n.nodeType == NTExpr || n.nodeType == NTList || n.nodeType == NTDict {
+		return json.Marshal(map[string]interface{}{
+			"type":     nodeTypeNames[n.nodeType],
+			"children": n.children,
+		})
+	} else {
+		return json.Marshal(map[string]string{
+			"type":      nodeTypeNames[n.nodeType],
+			"tokenType": tokenTypeNames[n.tokenType],
+			"value":     n.value,
+		})
+	}
 }
 
-func NewNode(nodeType NodeType, value string) *Node {
+func NewNode(parent *Node) *Node {
 	return &Node{
-		nodeType: nodeType,
-		value:    value,
+		parent:   parent,
+		nodeType: NTExpr,
+		children: []*Node{},
 	}
 }
 
-func isNumeric(c rune) bool {
-	return c >= '0' && c <= '9'
-}
-
-func isAlpha(c rune) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-func isAlphaNumeric(c rune) bool {
-	return isAlpha(c) || isNumeric(c)
-}
-
-func isWhitespace(c rune) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-}
-
-type Parser struct {
-	pos    int
-	source []rune
-}
-
-func parseNumber(p *Parser) *Node {
-	value := ""
-	c := p.source[p.pos]
-	for (isNumeric(c) || c == '.') && p.pos < len(p.source) {
-		value += string(c)
-		p.pos++
-		c = p.source[p.pos]
-	}
-
-	// Trailing dot is not part of this expression but of deref chain
-	if value[len(value)-1] == '.' {
-		p.pos--
-		value = value[0 : len(value)-2]
-	}
-
-	return NewNode(NTNumber, value)
-}
-
-func parseSymbol(p *Parser) *Node {
-	value := ""
-	c := p.source[p.pos]
-	for isAlphaNumeric(c) && p.pos < len(p.source) {
-		value += string(c)
-		p.pos++
-		c = p.source[p.pos]
-	}
-
-	return NewNode(NTSymbol, value)
-}
-
-func parseKeyword(p *Parser) *Node {
-	value := ""
-	// Skip '`'
-	p.pos++
-	c := p.source[p.pos]
-	for isAlphaNumeric(c) && p.pos < len(p.source) {
-		value += string(c)
-		p.pos++
-		c = p.source[p.pos]
-	}
-	return NewNode(NTKeyword, value)
-}
-
-func parseEscape(p *Parser) string {
-	// Skip backslach
-	p.pos++
-	c := p.source[p.pos]
-	switch c {
-	case '\\':
-		return "\\"
-	case '\'':
-		return "'"
-	case 'n':
-		return "\n"
-	case 't':
-		return "\t"
-	case 'r':
-		return "\r"
-	case 'b':
-		return "\b"
-	case 'f':
-		return "\f"
-	case 'v':
-		return "\v"
-	case 'a':
-		return "\a"
-	default:
-		// TODO support 0 (octal) x (2-hex) u (4-hex)
-		panic(fmt.Sprintf("Malformed escape ('\\') in string at position %d", p.pos))
+func NewNodeFromToken(parent *Node, token *Token) *Node {
+	return &Node{
+		parent:    parent,
+		nodeType:  NTToken,
+		tokenType: token.tokenType,
+		value:     token.value,
 	}
 }
 
-func parseString(p *Parser) *Node {
-	startPos := p.pos
-	value := ""
+func parseNode(n *Node) *Node {
+	if n.nodeType != NTExpr && n.nodeType != NTList && n.nodeType == NTDict {
+		return n
+	}
 
-	// Skip opening "'"
-	p.pos++
-
-	c := p.source[p.pos]
-	for c != '\'' {
-		if c == '\\' {
-			value += parseEscape(p)
-		} else {
-			value += string(c)
+	// Group items in parens as expressions
+	node := n
+	originalChildren := n.children
+	node.children = []*Node{}
+	for _, n := range originalChildren {
+		if n.tokenType == TTLParen {
+			node = NewNode(node) // descend
+			node.parent.children = append(node.parent.children, node)
+			continue
 		}
-		p.pos++
-		if p.pos >= len(p.source) {
-			panic(fmt.Sprintf("Unterminated string starting at position %d", startPos))
+		if n.tokenType == TTRParen {
+			if node.parent == nil {
+				panic("Superfluous closing parens")
+			}
+			node = node.parent // ascend
+			continue
 		}
-		c = p.source[p.pos]
+		node.children = append(node.children, n)
 	}
 
-	// Slip closing "'"
-	p.pos++
-
-	return NewNode(NTString, value)
+	return node
 }
 
-func parseComment(p *Parser) {
-	for p.pos < len(p.source) {
-		c := p.source[p.pos]
-		if c == '\n' || c == '\r' {
-			return
-		}
-		p.pos++
+func parse(tokens []*Token) *Node {
+	node := NewNode(nil)
+
+	// Convert tokens to AST nodes
+	for _, t := range tokens {
+		node.children = append(node.children, NewNodeFromToken(node, t))
 	}
-}
 
-func parseList(p *Parser) []*Node {
-	nodes := []*Node{}
-	for p.pos < len(p.source) {
-		c := p.source[p.pos]
-		if isNumeric(c) {
-			nodes = append(nodes, parseNumber(p))
-		} else if isAlpha(c) {
-			nodes = append(nodes, parseSymbol(p))
-		} else if c == '`' {
-			nodes = append(nodes, parseKeyword(p))
-		} else if c == '\'' {
-			nodes = append(nodes, parseString(p))
-		} else if c == '.' {
-			nodes = append(nodes, NewNode(NTDot, ""))
-			p.pos++
-		} else if c == ':' {
-			nodes = append(nodes, NewNode(NTAssign, ""))
-			p.pos++
-		} else if c == '#' {
-			parseComment(p)
-		} else if isWhitespace(c) {
-			// Ignore whitespace
-			p.pos++
-		} else {
-			panic(fmt.Sprintf("Illegal character '%c' at position %d", c, p.pos))
-		}
-		for _, n := range nodes {
-			fmt.Println(n)
-		}
-		fmt.Println("---------------------------")
-	}
-	return nodes
-}
-
-func parse(source string) []*Node {
-	parser := &Parser{0, []rune(source)}
-	return parseList(parser)
+	// Start recursively parsing tokens into actual expressions
+	return parseNode(node)
 }
 
 func main() {
-	defer func() {
-		if err := recover(); err != nil {
-			fmt.Println("Error: ", err)
-			os.Exit(1)
-		}
-	}()
-	source := "o: Obj clone\no.get(`key 'asd')\n5 plus 3 # wow"
-	for _, n := range parse(source) {
-		fmt.Println(n)
-	}
+	/*
+		defer func() {
+			if err := recover(); err != nil {
+				fmt.Println("Error: ", err)
+				os.Exit(1)
+			}
+		}()
+	*/
+	source := "o: Obj cl0ne\no.get(`key 'as\\td')\n5 plus 3 - 1 # wow"
+	tokens := lex(source)
+	node := parse(tokens)
+	bs, _ := json.MarshalIndent(node, "", "  ")
+	fmt.Println(string(bs))
+	// "github.com/k0kubun/pp"
+	// pp.Println(node)
 }
