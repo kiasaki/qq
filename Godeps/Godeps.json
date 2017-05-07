@@ -1,0 +1,33 @@
+{
+	"ImportPath": "github.com/kiasaki/qq",
+	"GoVersion": "go1.8",
+	"GodepVersion": "v79",
+	"Packages": [
+		"./..."
+	],
+	"Deps": [
+		{
+			"ImportPath": "github.com/k0kubun/pp",
+			"Comment": "v2.3.0-1-gd1532fc",
+			"Rev": "d1532fc5d94ecdf2da29e24d7b99721f3287de4a"
+		},
+		{
+			"ImportPath": "github.com/mattn/go-colorable",
+			"Comment": "v0.0.7-24-gded68f7",
+			"Rev": "ded68f7a9561c023e790de24279db7ebf473ea80"
+		},
+		{
+			"ImportPath": "github.com/mattn/go-isatty",
+			"Comment": "v0.0.2",
+			"Rev": "fc9e8d8ef48496124e79ae0df75490096eccf6fe"
+		},
+		{
+			"ImportPath": "github.com/prataprc/goparsec",
+			"Rev": "e21c7f3098914abb1dd42e77eafe8c93d26aaedc"
+		},
+		{
+			"ImportPath": "golang.org/x/sys/unix",
+			"Rev": "99f16d856c9836c42d24e7ab64ea72916925fa97"
+		}
+	]
+}

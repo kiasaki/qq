@@ -1,193 +1,165 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
+	"strconv"
+
+	"github.com/k0kubun/pp"
+	"github.com/prataprc/goparsec"
 )
 
-type NodeType int
+var _, _ = pp.Println("dummy print")
 
-const (
-	NTToken NodeType = iota
-	NTExpr
-	NTList
-	NTDict
-	NTDeref
-	NTAssign
-)
+// AST Types
+// ------------------------------------------------
 
-var nodeTypeNames = map[NodeType]string{
-	NTToken:  "token",
-	NTExpr:   "expr",
-	NTList:   "list",
-	NTDict:   "dict",
-	NTDeref:  "deref",
-	NTAssign: "assign",
-}
+type Null struct{}
+type True string
+type False string
+type Num string
+type String string
 
-type Node struct {
-	// Meta
-	parent   *Node
-	nodeType NodeType
+// Terminal Parsers
+// ------------------------------------------------
 
-	// Leaf
-	tokenType TokenType
-	value     string
+var nullP = parsec.Token("null", "NULL")
+var trueP = parsec.Token("true", "TRUE")
+var falseP = parsec.Token("false", "FALSE")
 
-	// Branch
-	children []*Node
-}
+var colonP = parsec.Token(`:`, "COLON")
+var commaP = parsec.Token(`,`, "COMMA")
+var openSqrP = parsec.Token(`\[`, "OPENSQR")
+var closeSqrP = parsec.Token(`\]`, "CLOSESQR")
+var openBraceP = parsec.Token(`\{`, "OPENBRACE")
+var closeBraceP = parsec.Token(`\}`, "CLOSEBRACE")
 
-func (n *Node) IsTerminal() bool {
-	return n.nodeType != NTExpr && n.nodeType != NTList && n.nodeType != NTDict
-}
+var intP = parsec.Int()
+var floatP = parsec.Float()
 
-func (n *Node) MarshalJSON() ([]byte, error) {
-	if !n.IsTerminal() {
-		return json.Marshal(map[string]interface{}{
-			"type":     nodeTypeNames[n.nodeType],
-			"children": n.children,
-		})
-	} else {
-		return json.Marshal(map[string]string{
-			"type":      nodeTypeNames[n.nodeType],
-			"tokenType": tokenTypeNames[n.tokenType],
-			"value":     n.value,
-		})
-	}
-}
-
-func (n *Node) indentedPrint(indent string) string {
-	if n.IsTerminal() {
-		if n.nodeType == NTToken {
-			return indent + "|" + tokenTypeNames[n.tokenType] + "|" + n.value + "|" + "\n"
-		} else {
-			return indent + "|" + nodeTypeNames[n.nodeType] + "|" + "\n"
+var stringP parsec.Parser = func(s parsec.Scanner) (parsec.ParsecNode, parsec.Scanner) {
+	if val, news := parsec.String()(s); val != nil {
+		t := parsec.Terminal{
+			Name:     "STRING",
+			Value:    val.(string),
+			Position: news.GetCursor(),
 		}
+		return &t, news
 	} else {
-		out := indent + "(" + "\n"
-		for _, n := range n.children {
-			out += n.indentedPrint(indent + "  ")
+		return nil, news
+	}
+}
+
+// Non-Terminal Parsers
+// ------------------------------------------------
+
+func nodifyAll(ns []parsec.ParsecNode) parsec.ParsecNode {
+	return ns
+}
+
+func nodifyNth(n int) func([]parsec.ParsecNode) parsec.ParsecNode {
+	return func(ns []parsec.ParsecNode) parsec.ParsecNode {
+		if ns == nil || len(ns) == 0 {
+			return ns
 		}
-		out += indent + ")" + "\n"
-		return out
+		return ns[n]
 	}
 }
 
-func (n *Node) Print() string {
-	return n.indentedPrint("")
+var Y parsec.Parser
+var value parsec.Parser
+
+// values -> value | values "," value
+var values = parsec.Kleene(nodifyAll, &value, commaP)
+
+// array -> "[" values "]"
+var array = parsec.And(arrayNode, openSqrP, values, closeSqrP)
+
+// property -> string ":" value
+var property = parsec.And(nodifyAll, stringP, colonP, &value)
+
+// properties -> property | properties "," property
+var properties = parsec.Kleene(propertiesNode, property, commaP)
+
+// object -> "{" properties "}"
+var object = parsec.And(nodifyNth(1), openBraceP, properties, closeBraceP)
+
+func init() {
+	// value -> null | true | false | num | string | array | object
+	value = parsec.OrdChoice(valueNode, nullP, trueP, falseP, intP, floatP, stringP, &array, &object)
+	// expr  -> sum
+	Y = parsec.OrdChoice(nodifyNth(0), value)
 }
 
-func NewNode(parent *Node, nodeType NodeType) *Node {
-	return &Node{
-		parent:   parent,
-		nodeType: nodeType,
-		children: []*Node{},
+// Nodifiers
+// ------------------------------------------------
+
+func valueNode(ns []parsec.ParsecNode) parsec.ParsecNode {
+	if ns == nil || len(ns) == 0 {
+		return nil
 	}
-}
-
-func NewNodeFromToken(parent *Node, token *Token) *Node {
-	return &Node{
-		parent:    parent,
-		nodeType:  NTToken,
-		tokenType: token.tokenType,
-		value:     token.value,
-	}
-}
-
-func parseNode(n *Node) *Node {
-	if n.IsTerminal() {
+	switch n := ns[0].(type) {
+	case *parsec.Terminal:
+		switch n.Name {
+		case "NULL":
+			return Null{}
+		case "TRUE":
+			return true
+		case "FALSE":
+			return false
+		case "FLOAT":
+			num, err := strconv.ParseFloat(n.Value, 64)
+			if err != nil {
+				panic(err)
+			}
+			return num
+		case "INT":
+			num, err := strconv.ParseInt(n.Value, 10, 64)
+			if err != nil {
+				panic(err)
+			}
+			return num
+		case "STRING":
+			return n.Value[1 : len(n.Value)-1]
+		}
+	case []parsec.ParsecNode:
+		return n
+	case []interface{}:
+		return n
+	case map[string]interface{}:
 		return n
 	}
-
-	// Group items in parens as expressions
-	node := n
-	originalChildren := n.children
-	node.children = []*Node{}
-	for _, n := range originalChildren {
-		if n.tokenType == TTLParen {
-			node = NewNode(node, NTExpr) // descend
-			node.parent.children = append(node.parent.children, node)
-			continue
-		}
-		if n.tokenType == TTRParen {
-			if node.parent == nil {
-				panic("Superfluous closing parens")
-			}
-			node = node.parent // ascend
-			continue
-		}
-		node.children = append(node.children, n)
-	}
-
-	// Split expressions on `;`
-	originalChildren = node.children
-	node.children = []*Node{}
-	expr := NewNode(node, NTExpr)
-	node.children = append(node.children, expr)
-	for _, n := range originalChildren {
-		if n.tokenType == TTSemiCol {
-			// Start a new expr
-			expr = NewNode(node, NTExpr)
-			node.children = append(node.children, expr)
-			continue
-		}
-
-		if n.IsTerminal() {
-			expr.children = append(expr.children, n)
-		} else {
-			expr.children = append(expr.children, parseNode(n))
-		}
-	}
-	// remove un-necessary nesting
-	if len(node.children) == 1 {
-		node.children = expr.children
-	}
-	// strip empty exprs from prefixed `;`
-	for len(node.children[0].children) == 0 {
-		node.children = node.children[1:]
-	}
-	// strip empty exprs from trailing `;`
-	for len(node.children[len(node.children)-1].children) == 0 {
-		node.children = node.children[:len(node.children)-2]
-	}
-	// un-nest single expression groupings
-	for i, n := range node.children {
-		if len(n.children) == 1 {
-			node.children[i] = n.children[0]
-		}
-	}
-
-	return node
+	return nil
 }
 
-func parse(tokens []*Token) *Node {
-	node := NewNode(nil, NTExpr)
-
-	// Convert tokens to AST nodes
-	for _, t := range tokens {
-		node.children = append(node.children, NewNodeFromToken(node, t))
+func arrayNode(ns []parsec.ParsecNode) parsec.ParsecNode {
+	if ns == nil || len(ns) == 0 {
+		return nil
 	}
-
-	// Start recursively parsing tokens into actual expressions
-	return parseNode(node)
+	arr := []interface{}{}
+	for _, node := range ns[1].([]parsec.ParsecNode) {
+		arr = append(arr, node)
+	}
+	return arr
 }
+
+func propertiesNode(ns []parsec.ParsecNode) parsec.ParsecNode {
+	if ns == nil {
+		return nil
+	}
+	m := make(map[string]interface{})
+	for _, n := range ns {
+		prop := n.([]parsec.ParsecNode)
+		key := prop[0].(*parsec.Terminal)
+		m[key.Value[1:len(key.Value)-1]] = prop[2]
+	}
+	return m
+}
+
+// Main
+// ------------------------------------------------
 
 func main() {
-	/*
-		defer func() {
-			if err := recover(); err != nil {
-				fmt.Println("Error: ", err)
-				os.Exit(1)
-			}
-		}()
-	*/
-	source := "o: Obj cl0ne\no.get(`key; d 'as\\td')\n5 plus 3 - 1 # wow"
-	tokens := lex(source)
-	node := parse(tokens)
-	bs, _ := json.MarshalIndent(node, "", "  ")
-	fmt.Println(string(bs))
-	fmt.Println(node.Print())
-	// "github.com/k0kubun/pp"
-	// pp.Println(node)
+	source := `{"asd": ["asd", true, null, 1], "no": true}`
+	s := parsec.NewScanner([]byte(source))
+	node, s := Y(s)
+	pp.Println(node)
 }
