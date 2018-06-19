@@ -1,5 +1,2 @@
-build: *.go
-	go build -o qq *.go
-
-run: build
-	./qq
+qq: qq.c
+	cc -Wall -Werror -g -o qq qq.c deps/linenoise.c deps/pcg_basic.c
